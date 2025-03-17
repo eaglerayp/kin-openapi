@@ -61,6 +61,16 @@ func componentNames[E any](s map[string]E) []string {
 	return out
 }
 
+// componentNamesSchemas returns the map keys in a sorted slice.
+func componentNamesSchemas(s Schemas) []string {
+	out := make([]string, 0, s.Len())
+	for pair := s.Oldest(); pair != nil; pair = pair.Next() {
+		out = append(out, pair.Key)
+	}
+
+	return out
+}
+
 // copyURI makes a copy of the pointer.
 func copyURI(u *url.URL) *url.URL {
 	if u == nil {

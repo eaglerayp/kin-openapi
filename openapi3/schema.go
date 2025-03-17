@@ -384,8 +384,9 @@ func (schema Schema) MarshalYAML() (any, error) {
 	if x := schema.Required; len(x) != 0 {
 		m["required"] = x
 	}
-	if x := schema.Properties; len(x) != 0 {
+	if x := schema.Properties; x.Len() != 0 {
 		m["properties"] = x
+		m["x-properties-order"] = x.Keys()
 	}
 	if x := schema.MinProps; x != 0 {
 		m["minProperties"] = x
@@ -680,7 +681,7 @@ func NewArraySchema() *Schema {
 func NewObjectSchema() *Schema {
 	return &Schema{
 		Type:       &Types{TypeObject},
-		Properties: make(Schemas),
+		Properties: NewSchemas(),
 	}
 }
 
@@ -800,20 +801,20 @@ func (schema *Schema) WithProperty(name string, propertySchema *Schema) *Schema 
 
 func (schema *Schema) WithPropertyRef(name string, ref *SchemaRef) *Schema {
 	properties := schema.Properties
-	if properties == nil {
-		properties = make(Schemas)
+	if properties.Len() == 0 {
+		properties = NewSchemas()
 		schema.Properties = properties
 	}
-	properties[name] = ref
+	properties.Set(name, ref)
 	return schema
 }
 
 func (schema *Schema) WithProperties(properties map[string]*Schema) *Schema {
-	result := make(Schemas, len(properties))
+	result := NewSchemas()
 	for k, v := range properties {
-		result[k] = &SchemaRef{
+		result.Set(k, &SchemaRef{
 			Value: v,
-		}
+		})
 	}
 	schema.Properties = result
 	return schema
@@ -866,9 +867,20 @@ func (schema *Schema) IsEmpty() bool {
 		schema.Min != nil || schema.Max != nil || schema.MultipleOf != nil ||
 		schema.MinLength != 0 || schema.MaxLength != nil || schema.Pattern != "" ||
 		schema.MinItems != 0 || schema.MaxItems != nil ||
-		len(schema.Required) != 0 ||
-		schema.MinProps != 0 || schema.MaxProps != nil {
+		len(schema.Required) != 0 || schema.MinProps != 0 || schema.MaxProps != nil {
 		return false
+	}
+	if schema.Properties.Len() > 0 {
+		for pair := schema.Properties.Oldest(); pair != nil; pair = pair.Next() {
+			if ss := pair.Value.Value; ss != nil && !ss.IsEmpty() {
+				return false
+			}
+		}
+	}
+	for _, s := range schema.OneOf {
+		if s != nil && s.Value != nil && !s.Value.IsEmpty() {
+			return false
+		}
 	}
 	if n := schema.Not; n != nil && n.Value != nil && !n.Value.IsEmpty() {
 		return false
@@ -881,26 +893,6 @@ func (schema *Schema) IsEmpty() bool {
 	}
 	if items := schema.Items; items != nil && items.Value != nil && !items.Value.IsEmpty() {
 		return false
-	}
-	for _, s := range schema.Properties {
-		if ss := s.Value; ss != nil && !ss.IsEmpty() {
-			return false
-		}
-	}
-	for _, s := range schema.OneOf {
-		if ss := s.Value; ss != nil && !ss.IsEmpty() {
-			return false
-		}
-	}
-	for _, s := range schema.AnyOf {
-		if ss := s.Value; ss != nil && !ss.IsEmpty() {
-			return false
-		}
-	}
-	for _, s := range schema.AllOf {
-		if ss := s.Value; ss != nil && !ss.IsEmpty() {
-			return false
-		}
 	}
 	return true
 }
@@ -1046,21 +1038,20 @@ func (schema *Schema) validate(ctx context.Context, stack []*Schema) ([]*Schema,
 		}
 	}
 
-	properties := make([]string, 0, len(schema.Properties))
-	for name := range schema.Properties {
-		properties = append(properties, name)
-	}
-	sort.Strings(properties)
-	for _, name := range properties {
-		ref := schema.Properties[name]
-		v := ref.Value
-		if v == nil {
-			return stack, foundUnresolvedRef(ref.Ref)
+	if schema.Properties.Len() > 0 {
+		propertyNames := make([]string, 0, schema.Properties.Len())
+		for pair := schema.Properties.Oldest(); pair != nil; pair = pair.Next() {
+			propertyNames = append(propertyNames, pair.Key)
 		}
-
-		var err error
-		if stack, err = v.validate(ctx, stack); err != nil {
-			return stack, err
+		for _, name := range propertyNames {
+			ref, _ := schema.Properties.Get(name)
+			v := ref.Value
+			if v == nil {
+				return stack, foundUnresolvedRef(ref.Ref)
+			}
+			if _, err := v.validate(ctx, stack); err != nil {
+				return stack, err
+			}
 		}
 	}
 
@@ -1908,29 +1899,16 @@ func (schema *Schema) visitJSONObject(settings *schemaValidationSettings, value 
 	var me MultiError
 
 	if settings.asreq || settings.asrep {
-		properties := make([]string, 0, len(schema.Properties))
-		for propName := range schema.Properties {
-			properties = append(properties, propName)
+		propertyNames := make([]string, 0, schema.Properties.Len())
+		for pair := schema.Properties.Oldest(); pair != nil; pair = pair.Next() {
+			propertyNames = append(propertyNames, pair.Key)
 		}
-		sort.Strings(properties)
-		for _, propName := range properties {
-			propSchema := schema.Properties[propName]
+		for _, propName := range propertyNames {
+			propSchema, _ := schema.Properties.Get(propName)
 			reqRO := settings.asreq && propSchema.Value.ReadOnly && !settings.readOnlyValidationDisabled
 			repWO := settings.asrep && propSchema.Value.WriteOnly && !settings.writeOnlyValidationDisabled
-
-			if f := settings.defaultsSet; f != nil && value[propName] == nil {
-				if dflt := propSchema.Value.Default; dflt != nil && !reqRO && !repWO {
-					value[propName] = dflt
-					settings.onceSettingDefaults.Do(f)
-				}
-			}
-
-			if value[propName] != nil {
-				if reqRO {
-					me = append(me, fmt.Errorf("readOnly property %q in request", propName))
-				} else if repWO {
-					me = append(me, fmt.Errorf("writeOnly property %q in response", propName))
-				}
+			if reqRO || repWO {
+				continue
 			}
 		}
 	}
@@ -1987,16 +1965,16 @@ func (schema *Schema) visitJSONObject(settings *schemaValidationSettings, value 
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := value[k]
-		if properties != nil {
-			propertyRef := properties[k]
-			if propertyRef != nil {
+		if properties.Len() > 0 {
+			propertyRef, found := properties.Get(k)
+			if found && propertyRef != nil {
 				p := propertyRef.Value
 				if p == nil {
 					return foundUnresolvedRef(propertyRef.Ref)
 				}
 				if err := p.visitJSON(settings, v); err != nil {
 					if settings.failfast {
-						return errSchema
+						return err
 					}
 					err = markSchemaErrorKey(err, k)
 					if !settings.multiError {
@@ -2049,10 +2027,11 @@ func (schema *Schema) visitJSONObject(settings *schemaValidationSettings, value 
 	// "required"
 	for _, k := range schema.Required {
 		if _, ok := value[k]; !ok {
-			if s := schema.Properties[k]; s != nil && s.Value.ReadOnly && settings.asreq {
+			propSchema, found := schema.Properties.Get(k)
+			if found && propSchema != nil && propSchema.Value.ReadOnly && settings.asreq {
 				continue
 			}
-			if s := schema.Properties[k]; s != nil && s.Value.WriteOnly && settings.asrep {
+			if found && propSchema != nil && propSchema.Value.WriteOnly && settings.asrep {
 				continue
 			}
 			if settings.failfast {
@@ -2245,10 +2224,4 @@ func RegisterArrayUniqueItemsChecker(fn SliceUniqueItemsChecker) {
 
 func unsupportedFormat(format string) error {
 	return fmt.Errorf("unsupported 'format' value %q", format)
-}
-
-// UnmarshalJSON sets Schemas to a copy of data.
-func (schemas *Schemas) UnmarshalJSON(data []byte) (err error) {
-	*schemas, _, err = unmarshalStringMapP[SchemaRef](data)
-	return
 }

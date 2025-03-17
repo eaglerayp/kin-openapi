@@ -2,7 +2,6 @@ package openapi3gen
 
 import (
 	"reflect"
-	"sort"
 	"sync"
 )
 
@@ -42,8 +41,8 @@ func getTypeInfo(t reflect.Type) *theTypeInfo {
 		// Add fields
 		typeInfo.Fields = appendFields(nil, nil, t)
 
-		// Sort fields
-		sort.Sort(sortableFieldInfos(typeInfo.Fields))
+		// // Sort fields
+		// sort.Sort(sortableFieldInfos(typeInfo.Fields))
 	}
 
 	// Publish
