@@ -10,9 +10,12 @@ require (
 	github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90
 	github.com/perimeterx/marshmallow v1.1.5
 	github.com/stretchr/testify v1.9.0
+	github.com/wk8/go-ordered-map/v2 v2.1.8
 )
 
 require (
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect

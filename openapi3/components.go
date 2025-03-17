@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/go-openapi/jsonpointer"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
 type (
@@ -17,9 +18,73 @@ type (
 	ParametersMap   map[string]*ParameterRef
 	RequestBodies   map[string]*RequestBodyRef
 	ResponseBodies  map[string]*ResponseRef
-	Schemas         map[string]*SchemaRef
 	SecuritySchemes map[string]*SecuritySchemeRef
 )
+
+type Schemas struct {
+	*orderedmap.OrderedMap[string, *SchemaRef]
+}
+
+// NewSchemas 創建一個新的 Schemas 實例
+func NewSchemas() Schemas {
+	return Schemas{
+		orderedmap.New[string, *SchemaRef](),
+	}
+}
+
+// Get 獲取指定鍵的值
+func (s Schemas) Get(key string) (*SchemaRef, bool) {
+	if s.OrderedMap == nil {
+		return nil, false
+	}
+	return s.OrderedMap.Get(key)
+}
+
+// Set 設置指定鍵的值
+func (s *Schemas) Set(key string, value *SchemaRef) {
+	if s.OrderedMap == nil {
+		s.OrderedMap = orderedmap.New[string, *SchemaRef]()
+	}
+	s.OrderedMap.Set(key, value)
+}
+
+// Len 返回映射的長度
+func (s Schemas) Len() int {
+	if s.OrderedMap == nil {
+		return 0
+	}
+	return s.OrderedMap.Len()
+}
+
+func (s Schemas) Keys() []string {
+	result := make([]string, 0, s.Len())
+	for pair := s.Oldest(); pair != nil; pair = pair.Next() {
+		result = append(result, pair.Key)
+	}
+	return result
+}
+
+// Oldest 返回最舊的鍵值對
+func (s Schemas) Oldest() *orderedmap.Pair[string, *SchemaRef] {
+	if s.OrderedMap == nil {
+		return nil
+	}
+	return s.OrderedMap.Oldest()
+}
+
+// MarshalJSON 將 Schemas 序列化為 JSON
+func (s Schemas) MarshalJSON() ([]byte, error) {
+	if s.OrderedMap == nil {
+		return []byte("{}"), nil
+	}
+
+	return s.OrderedMap.MarshalJSON()
+}
+
+// UnmarshalJSON 從 JSON 反序列化為 Schemas
+func (s *Schemas) UnmarshalJSON(data []byte) error {
+	return s.OrderedMap.UnmarshalJSON(data)
+}
 
 // Components is specified by OpenAPI/Swagger standard version 3.
 // See https://github.com/OAI/OpenAPI-Specification/blob/main/versions/3.0.3.md#components-object
@@ -57,7 +122,7 @@ func (components Components) MarshalYAML() (any, error) {
 	for k, v := range components.Extensions {
 		m[k] = v
 	}
-	if x := components.Schemas; len(x) != 0 {
+	if x := components.Schemas; x.Len() != 0 {
 		m["schemas"] = x
 	}
 	if x := components.Parameters; len(x) != 0 {
@@ -116,18 +181,16 @@ func (components *Components) UnmarshalJSON(data []byte) error {
 func (components *Components) Validate(ctx context.Context, opts ...ValidationOption) (err error) {
 	ctx = WithValidationOptions(ctx, opts...)
 
-	schemas := make([]string, 0, len(components.Schemas))
-	for name := range components.Schemas {
-		schemas = append(schemas, name)
-	}
-	sort.Strings(schemas)
-	for _, k := range schemas {
-		v := components.Schemas[k]
-		if err = ValidateIdentifier(k); err != nil {
-			return fmt.Errorf("schema %q: %w", k, err)
+	schemas := components.Schemas
+	// schemaNames := make([]string, 0, schemas.Len())
+	for pair := schemas.Oldest(); pair != nil; pair = pair.Next() {
+		// schemaNames = append(schemaNames, pair.Key)
+		v := pair.Value
+		if err = ValidateIdentifier(pair.Key); err != nil {
+			return fmt.Errorf("schema %q: %w", pair.Key, err)
 		}
 		if err = v.Validate(ctx); err != nil {
-			return fmt.Errorf("schema %q: %w", k, err)
+			return fmt.Errorf("schema %q: %w", pair.Key, err)
 		}
 	}
 
@@ -256,9 +319,10 @@ func (components *Components) Validate(ctx context.Context, opts ...ValidationOp
 
 var _ jsonpointer.JSONPointable = (*Schemas)(nil)
 
-// JSONLookup implements https://pkg.go.dev/github.com/go-openapi/jsonpointer#JSONPointable
+// JSONLookup implements github.com/go-openapi/jsonpointer#JSONPointable
 func (m Schemas) JSONLookup(token string) (any, error) {
-	if v, ok := m[token]; !ok || v == nil {
+	v, found := m.Get(token)
+	if !found || v == nil {
 		return nil, fmt.Errorf("no schema %q", token)
 	} else if ref := v.Ref; ref != "" {
 		return &Ref{Ref: ref}, nil

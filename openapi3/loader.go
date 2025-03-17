@@ -221,8 +221,11 @@ func (loader *Loader) ResolveRefsIn(doc *T, location *url.URL) (err error) {
 				return
 			}
 		}
-		for _, name := range componentNames(components.Schemas) {
-			component := components.Schemas[name]
+		for _, name := range componentNamesSchemas(components.Schemas) {
+			component, ok := components.Schemas.Get(name)
+			if !ok {
+				return fmt.Errorf("schema %q not found", name)
+			}
 			if err = loader.resolveSchemaRef(doc, component, location, []string{}); err != nil {
 				return
 			}
@@ -924,8 +927,8 @@ func (loader *Loader) resolveSchemaRef(doc *T, component *SchemaRef, documentPat
 			return err
 		}
 	}
-	for _, name := range componentNames(value.Properties) {
-		v := value.Properties[name]
+	for _, name := range componentNamesSchemas(value.Properties) {
+		v := value.Properties.Value(name)
 		if err := loader.resolveSchemaRef(doc, v, documentPath, visited); err != nil {
 			return err
 		}

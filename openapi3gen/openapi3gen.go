@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
 // CycleError indicates that a type graph has one or more possible cycles.
@@ -97,16 +98,16 @@ func NewSchemaRefForValue(value any, schemas openapi3.Schemas, opts ...Option) (
 type Generator struct {
 	opts generatorOpt
 
-	Types map[reflect.Type]*openapi3.SchemaRef
+	Types *orderedmap.OrderedMap[reflect.Type, *openapi3.SchemaRef]
 
 	// SchemaRefs contains all references and their counts.
 	// If count is 1, it's not ne
 	// An OpenAPI identifier has been assigned to each.
-	SchemaRefs map[*openapi3.SchemaRef]int
+	SchemaRefs *orderedmap.OrderedMap[*openapi3.SchemaRef, int]
 
 	// componentSchemaRefs is a set of schemas that must be defined in the components to avoid cycles
 	// or if we have specified create components schemas
-	componentSchemaRefs map[string]struct{}
+	componentSchemaRefs *orderedmap.OrderedMap[string, struct{}]
 }
 
 func NewGenerator(opts ...Option) *Generator {
@@ -115,9 +116,9 @@ func NewGenerator(opts ...Option) *Generator {
 		f(gOpt)
 	}
 	return &Generator{
-		Types:               make(map[reflect.Type]*openapi3.SchemaRef),
-		SchemaRefs:          make(map[*openapi3.SchemaRef]int),
-		componentSchemaRefs: make(map[string]struct{}),
+		Types:               orderedmap.New[reflect.Type, *openapi3.SchemaRef](),
+		SchemaRefs:          orderedmap.New[*openapi3.SchemaRef, int](),
+		componentSchemaRefs: orderedmap.New[string, struct{}](),
 		opts:                *gOpt,
 	}
 }
@@ -133,17 +134,19 @@ func (g *Generator) NewSchemaRefForValue(value any, schemas openapi3.Schemas) (*
 	if err != nil {
 		return nil, err
 	}
-	for ref := range g.SchemaRefs {
+	for pair := g.SchemaRefs.Oldest(); pair != nil; pair = pair.Next() {
+		ref := pair.Key
 		refName := ref.Ref
 		if g.opts.exportComponentSchemas.ExportComponentSchemas && strings.HasPrefix(refName, "#/components/schemas/") {
 			refName = strings.TrimPrefix(refName, "#/components/schemas/")
 		}
 
-		if _, ok := g.componentSchemaRefs[refName]; ok && schemas != nil {
-			if ref.Value != nil && ref.Value.Properties != nil {
-				schemas[refName] = &openapi3.SchemaRef{
+		_, ok := g.componentSchemaRefs.Get(refName)
+		if ok && schemas.OrderedMap != nil {
+			if ref.Value != nil && ref.Value.Properties.OrderedMap != nil {
+				schemas.Set(refName, &openapi3.SchemaRef{
 					Value: ref.Value,
-				}
+				})
 			}
 		}
 		if strings.HasPrefix(ref.Ref, "#/components/schemas/") {
@@ -156,8 +159,10 @@ func (g *Generator) NewSchemaRefForValue(value any, schemas openapi3.Schemas) (*
 }
 
 func (g *Generator) generateSchemaRefFor(parents []*theTypeInfo, t reflect.Type, name string, tag reflect.StructTag) (*openapi3.SchemaRef, error) {
-	if ref := g.Types[t]; ref != nil && g.opts.schemaCustomizer == nil {
-		g.SchemaRefs[ref]++
+	ref, exists := g.Types.Get(t)
+	if ref != nil && exists && g.opts.schemaCustomizer == nil {
+		count, _ := g.SchemaRefs.Get(ref)
+		g.SchemaRefs.Set(ref, count+1)
 		return ref, nil
 	}
 	ref, err := g.generateWithoutSaving(parents, t, name, tag)
@@ -169,8 +174,9 @@ func (g *Generator) generateSchemaRefFor(parents []*theTypeInfo, t reflect.Type,
 		return nil, err
 	}
 	if ref != nil {
-		g.Types[t] = ref
-		g.SchemaRefs[ref]++
+		g.Types.Set(t, ref)
+		count, _ := g.SchemaRefs.Get(ref)
+		g.SchemaRefs.Set(ref, count+1)
 	}
 	return ref, nil
 }
@@ -214,20 +220,23 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 			vs, err := g.generateSchemaRefFor(parents, v.Type, name, tag)
 			if err != nil {
 				if _, ok := err.(*CycleError); ok && !g.opts.throwErrorOnCycle {
-					g.SchemaRefs[vs]++
+					count, _ := g.SchemaRefs.Get(vs)
+					g.SchemaRefs.Set(vs, count+1)
 					return vs, nil
 				}
 				return nil, err
 			}
 			refSchemaRef := RefSchemaRef
-			g.SchemaRefs[refSchemaRef]++
+			count, _ := g.SchemaRefs.Get(refSchemaRef)
+			g.SchemaRefs.Set(refSchemaRef, count+1)
 			ref := openapi3.NewSchemaRef(t.Name(), &openapi3.Schema{
 				OneOf: []*openapi3.SchemaRef{
 					refSchemaRef,
 					vs,
 				},
 			})
-			g.SchemaRefs[ref]++
+			count, _ = g.SchemaRefs.Get(ref)
+			g.SchemaRefs.Set(ref, count+1)
 			return ref, nil
 		}
 	}
@@ -290,10 +299,11 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 
 	case reflect.Slice:
 		if t.Elem().Kind() == reflect.Uint8 {
-			if t != rawMessageType {
-				schema.Type = &openapi3.Types{"string"}
-				schema.Format = "byte"
+			if t == rawMessageType {
+				return &openapi3.SchemaRef{Value: schema}, nil
 			}
+			schema.Type = &openapi3.Types{"string"}
+			schema.Format = "byte"
 		} else {
 			schema.Type = &openapi3.Types{"array"}
 			items, err := g.generateSchemaRefFor(parents, t.Elem(), name, tag)
@@ -305,7 +315,8 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 				}
 			}
 			if items != nil {
-				g.SchemaRefs[items]++
+				count, _ := g.SchemaRefs.Get(items)
+				g.SchemaRefs.Set(items, count+1)
 				schema.Items = items
 			}
 		}
@@ -321,7 +332,8 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 			}
 		}
 		if additionalProperties != nil {
-			g.SchemaRefs[additionalProperties]++
+			count, _ := g.SchemaRefs.Get(additionalProperties)
+			g.SchemaRefs.Set(additionalProperties, count+1)
 			schema.AdditionalProperties = openapi3.AdditionalProperties{Schema: additionalProperties}
 		}
 
@@ -332,7 +344,8 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 		} else {
 			typeName := g.generateTypeName(t)
 
-			if _, ok := g.componentSchemaRefs[typeName]; ok && g.opts.exportComponentSchemas.ExportComponentSchemas {
+			_, ok := g.componentSchemaRefs.Get(typeName)
+			if ok && g.opts.exportComponentSchemas.ExportComponentSchemas {
 				// Check if we have already parsed this component schema ref based on the name of the struct
 				// and use that if so
 				return openapi3.NewSchemaRef(fmt.Sprintf("#/components/schemas/%s", typeName), schema), nil
@@ -357,7 +370,8 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 							}
 						}
 						if ref != nil {
-							g.SchemaRefs[ref]++
+							count, _ := g.SchemaRefs.Get(ref)
+							g.SchemaRefs.Set(ref, count+1)
 							schema.WithPropertyRef(fieldName, ref)
 						}
 					} else {
@@ -384,14 +398,15 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 					}
 				}
 				if ref != nil {
-					g.SchemaRefs[ref]++
+					count, _ := g.SchemaRefs.Get(ref)
+					g.SchemaRefs.Set(ref, count+1)
 					schema.WithPropertyRef(fieldName, ref)
 				}
 
 			}
 
 			// Object only if it has properties
-			if schema.Properties != nil {
+			if schema.Properties.OrderedMap != nil {
 				schema.Type = &openapi3.Types{"object"}
 			}
 		}
@@ -429,14 +444,9 @@ func (g *Generator) generateWithoutSaving(parents []*theTypeInfo, t reflect.Type
 
 	// For structs we add the schemas to the component schemas
 	if len(parents) > 1 || g.opts.exportComponentSchemas.ExportTopLevelSchema {
-		// If struct is a time.Time instance, separate component shouldn't be generated
-		if t == timeType {
-			return openapi3.NewSchemaRef(t.Name(), schema), nil
-		}
-
 		typeName := g.generateTypeName(t)
 
-		g.componentSchemaRefs[typeName] = struct{}{}
+		g.componentSchemaRefs.Set(typeName, struct{}{})
 		return openapi3.NewSchemaRef(fmt.Sprintf("#/components/schemas/%s", typeName), schema), nil
 	}
 
@@ -472,7 +482,7 @@ func (g *Generator) generateCycleSchemaRef(t reflect.Type, schema *openapi3.Sche
 		typeName = g.generateTypeName(t)
 	}
 
-	g.componentSchemaRefs[typeName] = struct{}{}
+	g.componentSchemaRefs.Set(typeName, struct{}{})
 	return openapi3.NewSchemaRef(fmt.Sprintf("#/components/schemas/%s", typeName), schema)
 }
 
